@@ -1,5 +1,9 @@
 Revision history for Perl extension Sort::UCA.
 
+0.04  Mon Aug 13 22:23:11 2001
+    - some bugs are fixed.
+    - some tailoring parameters are added.
+
 0.03  Mon Aug 06 06:26:35 2001
     - modify README
 

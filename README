@@ -1,4 +1,4 @@
-Sort/UCA version 0.03
+Sort/UCA version 0.04
 ===============================
 
 use UCA (Unicode Collation Algorithm)
@@ -6,11 +6,11 @@ use UCA (Unicode Collation Algorithm)
   See UCA - Unicode TR #10.
   http://www.unicode.org/unicode/reports/tr10/
 
-  Fetch the following file before use (and put into the Sort/UCA dir).
+  Fetch the following file before use (and put it into the Sort/UCA dir).
   http://www.unicode.org/unicode/reports/tr10/allkeys.txt
 
   You can install this module using a subset "keys.txt"
-  in this distribution without "allkeys.txt".
+  contained in this distribution without the "allkeys.txt".
 
 SYNOPSIS
 
@@ -37,24 +37,12 @@ To install this module type the following:
 DEPENDENCIES
 
 Perl 5.006 or later
+Carp
+Exporter
+Lingua::KO::Hangul::Util
 
-Carp, Exporter, Lingua::KO::Hangul::Util.
-
-BUGS
-
-At present, this module cannot compose nor decompose strings,
-and you must pass either the well-composed or the well-decomposed
-strings in the sort or cmp methods,
-or (?:de)?compose strings by preprocessing.
-
-e.g. a comparison of canonical equivalents,
-
-$UCA->cmp(
-  "A\x{0301}", # LATIN CAPITAL LETTER A, COMBINING ACUTE ACCENT
-  "\x{00C1}",  # LATIN CAPITAL LETTER A WITH ACUTE
-  )
-
-must return 0, but does not.
+It's better if Unicode::Normalize has been installed
+although Sort::UCA can be used without Unicode::Normalize.
 
 COPYRIGHT AND LICENCE
 

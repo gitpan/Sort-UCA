@@ -3,5 +3,5 @@ Makefile.PL
 MANIFEST
 README
 keys.txt
-test.pl
+t/test.t
 UCA.pm

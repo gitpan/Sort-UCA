@@ -13,13 +13,15 @@ our @ISA = qw(Exporter);
 our %EXPORT_TAGS = ();
 our @EXPORT_OK = ();
 our @EXPORT = ();
-our $VERSION = '0.03';
+our $VERSION = '0.04';
+our $PACKAGE = __PACKAGE__;
 
 (our $Path = $INC{'Sort/UCA.pm'}) =~ s/\.pm$//;
 our $KeyFile = "allkeys.txt";
 
-use constant Min2 => 0x20; # minimum weight at level 2
-use constant Min3 => 0x02; # minimum weight at level 3
+use constant Min2      => 0x20;   # minimum weight at level 2
+use constant Min3      => 0x02;   # minimum weight at level 3
+use constant UNDEFINED => 0xFF80; # special value for undefined CE
 
 ##
 ## constructor
@@ -29,18 +31,33 @@ sub new
   my $class = shift;
   my $self = bless { @_ }, $class;
 
-  # default alternate
-  $self->{alternate} ||= 'shifted';
+  # alternate
+  $self->{alternate} = 
+     ! exists  $self->{alternate} ? 'shifted' :
+     ! defined $self->{alternate} ? '' : $self->{alternate};
 
-  # default collation level
+  # collation level
   $self->{level} ||= $self->{alternate} =~ /shift/ ? 4 : 3;
 
-  # backwards in an arrayref
+  # normalization form
+  eval "use Unicode::Normalize;" unless
+    exists  $self->{normalization} && ! defined $self->{normalization};
+
+  $self->{normalize} = 
+    ! exists  $self->{normalization}        ? \&NFD :
+    ! defined $self->{normalization}        ? undef :
+    $self->{normalization} =~ /^(?:NF)?C$/  ? \&NFC :
+    $self->{normalization} =~ /^(?:NF)?D$/  ? \&NFD :
+    $self->{normalization} =~ /^(?:NF)?KC$/ ? \&NFKC :
+    $self->{normalization} =~ /^(?:NF)?KD$/ ? \&NFKD :
+    croak "$PACKAGE unknown normalization form name: $self->{normalization}";
+
+  # backwards
   $self->{backwards} ||= [];
   $self->{backwards} = [ $self->{backwards} ] if ! ref $self->{backwards};
 
-  # rearrange in an arrayref
-  $self->{rearrange} ||= [];
+  # rearrange
+  $self->{rearrange} ||= []; # maybe not U+0000 (an ASCII)
   $self->{rearrange} = [ $self->{rearrange} ] if ! ref $self->{rearrange};
 
   # open the table file
@@ -78,14 +95,7 @@ sub new
   return $self;
 }
 
-##
-## "hhhh hhhh hhhh" to (dddd, dddd, dddd)
-##
-sub _getHexArray
-{
-  my $str = shift;
-  map hex(), $str =~ /([0-9a-fA-F]+)/g;
-}
+
 
 ##
 ## get $line, parse it, and write an entry in $self
@@ -100,21 +110,31 @@ sub parseEntry
 
   # get name
   $name = $1 if $line =~ s/#\s*(.*)//;
-  return if defined $self->{ignoreName} && $name =~ /$self->{ignoreName}/;
+  return if defined $self->{undefName} && $name =~ /$self->{undefName}/;
 
   # get element
-  my($e, $k) = split /;/, $_;
+  my($e, $k) = split /;/, $line;
   my @e = _getHexArray($e);
   $ele = pack('U*', @e);
-  return if defined $self->{ignoreChar} && $ele =~ /$self->{ignoreChar}/;
+  return if defined $self->{undefChar} && $ele =~ /$self->{undefChar}/;
 
   # get sort key
-  foreach my $arr ($k =~ /\[(\S+)\]/g)
+  if(
+     defined $self->{ignoreName} && $name =~ /$self->{ignoreName}/ ||
+     defined $self->{ignoreChar} && $ele  =~ /$self->{ignoreChar}/
+  )
   {
-    my $var = $arr =~ /\*/;
-    push @key, $self->getCE( $var, _getHexArray($arr) );
+     $self->{ignored}{$ele} = 1;
+     $self->{entries}{$ele} = 1; # true
   }
-  $self->{entries}{$ele} = \@key;
+  else
+  {
+    foreach my $arr ($k =~ /\[(\S+)\]/g) {
+      my $var = $arr =~ /\*/;
+      push @key, $self->getCE( $var, _getHexArray($arr) );
+    }
+    $self->{entries}{$ele} = \@key;
+  }
   $self->{maxlength}{ord $ele} = scalar @e if @e > 1;
 }
 
@@ -132,7 +152,7 @@ sub getCE
      $var ? [0,0,0] : [ @c[0..2] ] :
   $self->{alternate} eq 'non-ignorable' ? [ @c[0..2] ] :
   $self->{alternate} eq 'shifted' ?
-    $var ? [0,0,0,$c[0] ] : [ @c[0..2], 0xFFFF ] :
+    $var ? [0,0,0,$c[0] ] : [ @c[0..2], $c[3] ? 0xFFFF : 0 ] :
   $self->{alternate} eq 'shift-trimmed' ?
     $var ? [0,0,0,$c[0] ] : [ @c[0..2], 0 ] :
    \@c;
@@ -144,9 +164,9 @@ sub getCE
 sub viewSortKey
 {
   my $self = shift;
-  my $key  = $self->getSortKey(@_);
-  join ' ', map {
-    '['.join(',', map sprintf("%04X", $_), @$_).']';
+  my $key  = ref $_[0] ? $_[0] : $self->getSortKey(@_);
+  sprintf "[%s]", join '|', map {
+    join(' ', map sprintf("%04X", $_), @$_);
   } @$key;
 }
 
@@ -157,15 +177,18 @@ sub getSortKey
 {
   my $self = shift;
   my $code = $self->{preprocess};
+  my $norm = $self->{normalize};
   my $ent  = $self->{entries};
+  my $ign  = $self->{ignored};
   my $max  = $self->{maxlength};
+  my $lev  = $self->{level};
   my $cjk  = $self->{overrideCJK};
   my $hang = $self->{overrideHangul};
-  my $back = $self->{backwards};
   my $rear = $self->{rearrangeHash};
-  my $uplw = $self->{upper_before_lower};
 
   my $str = ref $code ? &$code(shift) : shift;
+  $str = &$norm($str) if ref $norm;
+
   my(@src, @buf);
   @src = unpack('U*', $str);
 
@@ -182,16 +205,21 @@ sub getSortKey
     my $ch;
     my $u  = $src[$i];
 
-    if($max->{$u})
+    if($max->{$u}) # contract
     {
       for(my $j = $max->{$u}; $j >= 1; $j--)
-      { # contract
+      { 
         next unless $i+$j-1 < @src;
         $ch = pack 'U*', @src[$i .. $i+$j-1];
         $i += $j-1, last if $ent->{$ch};
       }
     }
     else {  $ch = pack('U', $u) }
+    
+    next if !defined $ch or $ign->{$ch}; # ignored
+
+    my $four = $u & 0xFFFF; # non-characters
+    next if $four == 0xFFFE || $four == 0xFFFF;
 
     push @buf,
       $ent->{$ch}
@@ -201,34 +229,35 @@ sub getSortKey
             ? &$hang($u)
             : map(@{ $ent->{pack('U', $_)} }, decomposeHangul($u))
           : _isCJK($u)
-            ? $cjk ? &$cjk($u) : $self->getCE( 0, ($u, Min2, Min3) )
-            : ();
+            ? $cjk ? &$cjk($u) : $self->getCE(0,$u,0x20,0x02,$u)
+            : map($self->getCE(0,@$_), _derivCE($u));
   }
 
+  # make sort key
   my @ret = ([],[],[],[]);
-  foreach my $lv (0..3){
+  foreach my $v (0..$lev-1){
     foreach my $b (@buf){
-      push @{ $ret[$lv] }, $b->[$lv] if $b->[$lv];
+      push @{ $ret[$v] }, $b->[$v] if $b->[$v];
     }
   }
-  foreach (@$back){
-    my $lv = $_ - 1;
-    @{ $ret[$lv] } = reverse @{ $ret[$lv] };
+  foreach (@{ $self->{backwards} }){
+    my $v = $_ - 1;
+    @{ $ret[$v] } = reverse @{ $ret[$v] };
   }
-  if($uplw){ # upper_before_lower : tertiary weight is modified.
+
+  # modification of tertiary weights
+  if($self->{upper_before_lower}){
     foreach (@{ $ret[2] }){
-      if(0x8 <= $_ && $_ <= 0xC){
-        $_ -= 6;
-      }
-      elsif(0x2 <= $_ && $_ <= 0x6){
-        $_ += 6;
-      }
-      elsif($_ == 0x1C){
-        $_ += 1;
-      }
-      elsif($_ <= 0x1D){
-        $_ -= 1;
-      }
+      if   (0x8 <= $_ && $_ <= 0xC){ $_ -= 6 } # lower
+      elsif(0x2 <= $_ && $_ <= 0x6){ $_ += 6 } # upper
+      elsif($_ == 0x1C)            { $_ += 1 } # square upper
+      elsif($_ == 0x1D)            { $_ -= 1 } # square lower
+    }
+  }
+  if($self->{katakana_before_hiragana}){
+    foreach (@{ $ret[2] }){
+      if   (0x0F <= $_ && $_ <= 0x13){ $_ -= 2 } # katakana
+      elsif(0x0D <= $_ && $_ <= 0x0E){ $_ += 5 } # hiragana
     }
   }
   return \@ret;
@@ -280,6 +309,27 @@ sub sort
   map [ $obj->getSortKey($_), $_ ], @_;
 }
 
+##
+## Derived CE
+##
+sub _derivCE
+{
+  my $code = shift;
+  my $a = UNDEFINED + ($code >> 15);
+  my $b = ($code & 0x7FFF) | 0x8000;
+##* my $a = 0xFFC2 + ($code >> 15);
+##* my $b = $code & 0x7FFF | 0x1000;
+  $b ? ([$a,2,1,$code],[$b,0,0,$code]) : [$a,2,1,$code];
+}
+
+##
+## "hhhh hhhh hhhh" to (dddd, dddd, dddd)
+##
+sub _getHexArray
+{
+  my $str = shift;
+  map hex(), $str =~ /([0-9a-fA-F]+)/g;
+}
 
 ##
 ##  CJK Unified Ideographs
@@ -289,7 +339,16 @@ sub _isCJK
   my $code = shift;
   return 0x3400  <= $code && $code <= 0x4DB5  
       || 0x4E00  <= $code && $code <= 0x9FA5  
-      || 0x20000 <= $code && $code <= 0x2A6D6;
+#      || 0x20000 <= $code && $code <= 0x2A6D6;
+}
+
+##
+##  CJK Unified Ideographs
+##
+sub _CJK
+{
+  my $code = shift;
+  $code > 0xFFFF ? _derivCE($code) : [ [$code,0x20,0x02,$code] ];
 }
 
 ##
@@ -313,30 +372,35 @@ Sort::UCA - use UCA (Unicode Collation Algorithm)
   use Sort::UCA;
 
   #construct
-  $uca = Sort::UCA->new(%tailoring);
+  $UCA = Sort::UCA->new(%tailoring);
+     # if %tailoring is false (empty), $UCA should do the default collation.
 
   #sort
-  @sorted = $uca->sort(@not_sorted);
+  @sorted = $UCA->sort(@not_sorted);
 
   #compare
-  $result = $uca->cmp($a, $b); # returns 1, 0, or -1. 
+  $result = $UCA->cmp($a, $b); # returns 1, 0, or -1. 
 
 =head1 DESCRIPTION
 
 =head2 Constructor and Tailoring
 
-   $uca = Sort::UCA->new(
+   $UCA = Sort::UCA->new(
       alternate => $alternate,
       backwards => $levelNumber, # or \@levelNumbers
       entry => $element,
-      ignoreName => qr/regex/,
-      ignoreChar => qr/regex/,
+      normalization  => $normalization_form,
+      ignoreName => qr/$ignoreName/,
+      ignoreChar => qr/$ignoreChar/,
+      katakana_before_hiragana => $bool,
       level => $collationLevel,
       overrideCJK => \&overrideCJK,
       overrideHangul => \&overrideHangul,
       preprocess => \&preprocess,
       rearrange => \@charList,
       table => $filename,
+      undefName => qr/$undefName/,
+      undefChar => qr/$undefChar/,
       upper_before_lower => $bool,
    );
 
@@ -363,7 +427,7 @@ If omitted, forwards at all the levels.
 
 -- see 3.1 Linguistic Features; 3.2.1 File Format, UTR #10.
 
-Override a default order or add a new element
+Overrides a default order or adds a new element
 
   entry => <<'ENTRIES', # use the UCA file format
 00E6 ; [.0861.0020.0002.00E6] [.08B1.0020.0002.00E6] # ligature <ae> as <a e>
@@ -373,19 +437,14 @@ ENTRIES
 
 =item ignoreName or ignoreChar
 
--- see 6.3.4 Reducing the Repertoire, UTR #10.
+-- see Completely Ignorable, 3.2.2 Alternate Weighting, UTR #10.
 
-  ignoreName => qr/\bDINGBAT\b/,
-     # Elements the name of which matches the regex are ignored.
+Ignores the entry in the table.
+If an ignored collation element appears in the string to be collated,
+it is ignored as if the element had been deleted from there.
 
-  ignoreChar => qr/^(?:\p{InDingbat}|\p{Lm})$/,
-     # Elements which matches the regex are ignored.
-
-When 'a' and 'e' are ignored,
+E.g. when 'a' and 'e' are ignored,
 'element' is equal to 'lament' (or 'lmnt').
-
-But, it'd be better to ignore characters
-unfamiliar to you (and maybe never used).
 
 =item level
 
@@ -400,6 +459,28 @@ Any higher levels than the specified one are ignored.
   Level 4: tie-breaking (e.g. in the case when alternate is 'shifted')
 
   ex.level => 2,
+
+=item normalization
+
+-- see 4.1 Normalize each input string, UTR #10.
+
+If specified, strings are normalized before preparation sort keys
+(the normalization is executed after preprocess).
+
+As a form name, one of the following names must be used.
+
+  'C'  or 'NFC'  for Normalization Form C
+  'D'  or 'NFD'  for Normalization Form D
+  'KC' or 'NFKC' for Normalization Form KC
+  'KD' or 'NFKD' for Normalization Form KD
+
+If omitted, the string is put into Normalization Form D.
+
+If undefined explicitly (as C<normalization =E<gt> undef>),
+any normalization is not carried out (this may make tailoring easier
+if any normalization is not desired).
+
+see B<CAVEAT>.
 
 =item overrideCJK or overrideHangul
 
@@ -421,6 +502,10 @@ ex. CJK Unified Ideographs in the JIS codepoint order.
     my $n = unpack('n', $s);     # convert sjis to short
     [ $n, 1, 1 ];                # return collation element
   },
+
+If you want to override the mapping of Hangul Syllables,
+the Normalization Forms D and KD are not appropriate
+(they will be decomposed before overriding).
 
 =item preprocess
 
@@ -445,7 +530,7 @@ Then, "the pen" is before "a pencil".
 Characters that are not coded in logical order and to be rearranged.
 By default, 
 
-    rearrange => [ 0x0E40..0x0E44, 0x0EC0..0x0EC4],
+    rearrange => [ 0x0E40..0x0E44, 0x0EC0..0x0EC4 ],
 
 =item table
 
@@ -456,18 +541,45 @@ The table file must be in your C<lib/Sort/UCA> directory.
 
 By default, the file C<lib/Sort/UCA/allkeys.txt> is used.
 
+=item undefName or undefChar
+
+-- see 6.3.4 Reducing the Repertoire, UTR #10.
+
+Undefines the collation element as if it were unassigned in the table.
+This reduces the size of the table.
+If an unassigned character appears in the string to be collated,
+the sort key is made from its codepoint
+as a single-character collation element,
+as it is greater than any other assigned collation elements
+(in the codepoint order among the unassigned characters).
+But, it'd be better to ignore characters
+unfamiliar to you and maybe never used.
+
+=item katakana_before_hiragana
+
 =item upper_before_lower
 
 -- see 6.6 Case Comparisons; 7.3.1 Tertiary Weight Table, UTR #10.
 
-By default, lowercase is before uppercase.
-If upper_before_lower is true, this is reversed.
+By default, lowercase is before uppercase
+and hiragana is before katakana.
+
+If the parameter is true, this is reversed.
 
 =back
 
 =head2 EXPORT
 
 None by default.
+
+=head2 CAVEAT
+
+Use of the C<normalization> parameter requires
+the B<Unicode::Normalization> module.
+
+If you need not it (e.g. in the case when you need not
+handle any combining characters),
+assign C<normalization =E<gt> undef> explicitly.
 
 =head1 AUTHOR
 
@@ -482,12 +594,20 @@ SADAHIRO Tomoyuki, E<lt>SADAHIRO@cpan.orgE<gt>
 
 =head1 SEE ALSO
 
-L<perl>.
+=over 4
 
-L<Lingua::KO::Hangul::Util>.
+=item L<Lingua::KO::Hangul::Util>
 
-L<UCA> - Unicode TR #10
+utility functions for Hangul Syllables
+
+=item L<Unicode::Normalize>
+
+normalized forms of Unicode text
+
+=item Unicode Collation Algorithm - Unicode TR #10
 
 http://www.unicode.org/unicode/reports/tr10/
+
+=back
 
 =cut
