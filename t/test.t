@@ -4,7 +4,7 @@
 #########################
 
 use Test;
-BEGIN { plan tests => 18 };
+BEGIN { plan tests => 20 };
 use Sort::UCA;
 ok(1); # If we made it this far, we're ok.
 
@@ -30,6 +30,9 @@ my $A_acute = pack('U', 0x00C1);
 my $acute   = pack('U', 0x0301);
 
 ok($UCA->cmp("A$acute", $A_acute), -1);
+
+ok($UCA->cmp("", ""), 0);
+ok($UCA->cmp("", "perl"), -1);
 
 eval "use Unicode::Normalize";
 

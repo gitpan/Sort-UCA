@@ -7,13 +7,14 @@ use Carp;
 use Lingua::KO::Hangul::Util;
 require Exporter;
 
+our $VERSION = '0.06';
+our $PACKAGE = __PACKAGE__;
+
 our @ISA = qw(Exporter);
 
 our %EXPORT_TAGS = ();
 our @EXPORT_OK = ();
 our @EXPORT = ();
-our $VERSION = '0.05';
-our $PACKAGE = __PACKAGE__;
 
 (our $Path = $INC{'Sort/UCA.pm'}) =~ s/\.pm$//;
 our $KeyFile = "allkeys.txt";
@@ -569,6 +570,37 @@ If the parameter is true, this is reversed.
 
 =back
 
+=head2 Other methods
+
+=over 4
+
+=item C<@sorted = $UCA-E<gt>sort(@not_sorted)>
+
+Sorts a list of strings.
+
+=item C<$result = $UCA-E<gt>cmp($a, $b)>
+
+Returns 1 (when C<$a> is greater than C<$b>)
+or 0 (when C<$a> is equal to C<$b>)
+or -1 (when C<$a> is lesser than C<$b>).
+
+=item C<$sortKey = $UCA-E<gt>getSortKey($string)>
+
+-- see 4.3 Form a sort key for each string, UTR #10.
+
+Returns a sort key.
+
+You compare the sort keys using a binary comparison
+and get the result of the comparison of the strings using UCA.
+
+   $UCA->getSortKey($a) cmp $UCA->getSortKey($b)
+
+      is equivalent to
+
+   $UCA->cmp($a, $b)
+
+=back
+
 =head2 EXPORT
 
 None by default.
@@ -576,7 +608,7 @@ None by default.
 =head2 CAVEAT
 
 Use of the C<normalization> parameter requires
-the B<Unicode::Normalization> module.
+the B<Unicode::Normalize> module.
 
 If you need not it (e.g. in the case when you need not
 handle any combining characters),
