@@ -1,0 +1,12 @@
+Revision history for Perl extension Sort::UCA.
+
+0.03  Mon Aug 06 06:26:35 2001
+    - modify README
+
+0.02  Sun Aug 05 20:20:01 2001
+    - some fix
+
+0.01  Sun Jul 29 16:16:15 2001
+    - original version; created by h2xs 1.21
+      with options -A -X -n Sort::UCA
+
