@@ -1,5 +1,9 @@
 Revision history for Perl extension Sort::UCA.
 
+0.05  Mon Aug 13 22:23:11 2001
+    - bug fix: on the things of 4.2.1, UTR #10
+    - getSortKey returns a string, not but an arrayref.
+
 0.04  Mon Aug 13 22:23:11 2001
     - some bugs are fixed.
     - some tailoring parameters are added.

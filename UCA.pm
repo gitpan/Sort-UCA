@@ -5,7 +5,6 @@ use strict;
 use warnings;
 use Carp;
 use Lingua::KO::Hangul::Util;
-
 require Exporter;
 
 our @ISA = qw(Exporter);
@@ -13,11 +12,13 @@ our @ISA = qw(Exporter);
 our %EXPORT_TAGS = ();
 our @EXPORT_OK = ();
 our @EXPORT = ();
-our $VERSION = '0.04';
+our $VERSION = '0.05';
 our $PACKAGE = __PACKAGE__;
 
 (our $Path = $INC{'Sort/UCA.pm'}) =~ s/\.pm$//;
 our $KeyFile = "allkeys.txt";
+
+our %Combin; # combining class from Unicode::Normalize
 
 use constant Min2      => 0x20;   # minimum weight at level 2
 use constant Min3      => 0x02;   # minimum weight at level 3
@@ -40,17 +41,19 @@ sub new
   $self->{level} ||= $self->{alternate} =~ /shift/ ? 4 : 3;
 
   # normalization form
-  eval "use Unicode::Normalize;" unless
-    exists  $self->{normalization} && ! defined $self->{normalization};
+  $self->{normalization} = 'D' if ! exists $self->{normalization};
+
+  eval "use Unicode::Normalize;" if defined $self->{normalization};
 
   $self->{normalize} = 
-    ! exists  $self->{normalization}        ? \&NFD :
     ! defined $self->{normalization}        ? undef :
     $self->{normalization} =~ /^(?:NF)?C$/  ? \&NFC :
     $self->{normalization} =~ /^(?:NF)?D$/  ? \&NFD :
     $self->{normalization} =~ /^(?:NF)?KC$/ ? \&NFKC :
     $self->{normalization} =~ /^(?:NF)?KD$/ ? \&NFKD :
     croak "$PACKAGE unknown normalization form name: $self->{normalization}";
+
+  *Combin = \%Unicode::Normalize::Combin if $self->{normalize} && ! %Combin;
 
   # backwards
   $self->{backwards} ||= [];
@@ -94,8 +97,6 @@ sub new
 
   return $self;
 }
-
-
 
 ##
 ## get $line, parse it, and write an entry in $self
@@ -152,7 +153,7 @@ sub getCE
      $var ? [0,0,0] : [ @c[0..2] ] :
   $self->{alternate} eq 'non-ignorable' ? [ @c[0..2] ] :
   $self->{alternate} eq 'shifted' ?
-    $var ? [0,0,0,$c[0] ] : [ @c[0..2], $c[3] ? 0xFFFF : 0 ] :
+    $var ? [0,0,0,$c[0] ] : [ @c[0..2], $c[0]+$c[1]+$c[2] ? 0xFFFF : 0 ] :
   $self->{alternate} eq 'shift-trimmed' ?
     $var ? [0,0,0,$c[0] ] : [ @c[0..2], 0 ] :
    \@c;
@@ -164,10 +165,10 @@ sub getCE
 sub viewSortKey
 {
   my $self = shift;
-  my $key  = ref $_[0] ? $_[0] : $self->getSortKey(@_);
-  sprintf "[%s]", join '|', map {
-    join(' ', map sprintf("%04X", $_), @$_);
-  } @$key;
+  my $key  = $self->getSortKey(@_);
+  my $view = join " ", map sprintf("%04X", $_), unpack 'n*', $key;
+  $view =~ s/ ?0000 ?/|/g;
+  "[$view]";
 }
 
 ##
@@ -205,6 +206,12 @@ sub getSortKey
     my $ch;
     my $u  = $src[$i];
 
+  # non-characters
+    next if $u < 0 || 0x10FFFF < $u     # out of range
+         || 0xD800 < $u && $u < 0xDFFF; # unpaired surrogates
+    my $four = $u & 0xFFFF; 
+    next if $four == 0xFFFE || $four == 0xFFFF;
+
     if($max->{$u}) # contract
     {
       for(my $j = $max->{$u}; $j >= 1; $j--)
@@ -215,11 +222,20 @@ sub getSortKey
       }
     }
     else {  $ch = pack('U', $u) }
-    
-    next if !defined $ch or $ign->{$ch}; # ignored
 
-    my $four = $u & 0xFFFF; # non-characters
-    next if $four == 0xFFFE || $four == 0xFFFF;
+    if(%Combin && defined $ch) # with Combining Char
+    {
+      for(my $j = $i+1; $j < @src && $Combin{ $src[$j] }; $j++)
+      {
+        my $comb = pack 'U', $src[$j];
+        next if ! $ent->{ $ch.$comb };
+        $ch .= $comb;
+        splice(@src, $j, 1);
+        last;
+      }
+    }
+
+    next if !defined $ch || $ign->{$ch};   # ignored
 
     push @buf,
       $ent->{$ch}
@@ -229,7 +245,7 @@ sub getSortKey
             ? &$hang($u)
             : map(@{ $ent->{pack('U', $_)} }, decomposeHangul($u))
           : _isCJK($u)
-            ? $cjk ? &$cjk($u) : $self->getCE(0,$u,0x20,0x02,$u)
+            ? $cjk ? &$cjk($u) : map($self->getCE(0,@$_), _CJK($u))
             : map($self->getCE(0,@$_), _derivCE($u));
   }
 
@@ -260,28 +276,9 @@ sub getSortKey
       elsif(0x0D <= $_ && $_ <= 0x0E){ $_ += 5 } # hiragana
     }
   }
-  return \@ret;
+  join "\0\0", map pack('n*', @$_), @ret;
 }
 
-##
-## compare two sort keys
-##
-sub cmpSortKey
-{
-  my $obj = shift;
-  my $a   = shift;
-  my $b   = shift;
-  my $lv  = $obj->{level};
-  for my $lv (0..$lv-1){
-    my $n = @$a > @$b ? @$a - 1 : @$b - 1;
-    foreach my $j (0..$n){
-      my $r = ((defined $a->[$lv][$j] ? $a->[$lv][$j] : 0)
-           <=> (defined $b->[$lv][$j] ? $b->[$lv][$j] : 0));
-        return $r if $r;
-     }
-  }
-  return 0;
-}
 
 ##
 ## cmp
@@ -291,10 +288,7 @@ sub cmp
   my $obj = shift;
   my $a   = shift;
   my $b   = shift;
-  $obj->cmpSortKey(
-     $obj->getSortKey($a),
-     $obj->getSortKey($b),
-    );
+  $obj->getSortKey($a) cmp $obj->getSortKey($b);
 }
 
 ##
@@ -305,7 +299,7 @@ sub sort
   my $obj = shift;
 
   map { $_->[1] }
-  sort{ $obj->cmpSortKey($a->[0], $b->[0]) }
+  sort{ $a->[0] cmp $b->[0] }
   map [ $obj->getSortKey($_), $_ ], @_;
 }
 
@@ -315,10 +309,10 @@ sub sort
 sub _derivCE
 {
   my $code = shift;
-  my $a = UNDEFINED + ($code >> 15);
-  my $b = ($code & 0x7FFF) | 0x8000;
-##* my $a = 0xFFC2 + ($code >> 15);
-##* my $b = $code & 0x7FFF | 0x1000;
+  my $a = UNDEFINED + ($code >> 15); # ok
+  my $b = ($code & 0x7FFF) | 0x8000; # ok
+# my $a = 0xFFC2 + ($code >> 15);    # ng
+# my $b = $code & 0x7FFF | 0x1000;   # ng
   $b ? ([$a,2,1,$code],[$b,0,0,$code]) : [$a,2,1,$code];
 }
 
@@ -336,10 +330,10 @@ sub _getHexArray
 ##
 sub _isCJK
 {
-  my $code = shift;
-  return 0x3400  <= $code && $code <= 0x4DB5  
-      || 0x4E00  <= $code && $code <= 0x9FA5  
-#      || 0x20000 <= $code && $code <= 0x2A6D6;
+  my $u = shift;
+  return 0x3400 <= $u && $u <= 0x4DB5  
+      || 0x4E00 <= $u && $u <= 0x9FA5  
+#      || 0x20000 <= $u && $u <= 0x2A6D6;
 }
 
 ##
@@ -347,8 +341,8 @@ sub _isCJK
 ##
 sub _CJK
 {
-  my $code = shift;
-  $code > 0xFFFF ? _derivCE($code) : [ [$code,0x20,0x02,$code] ];
+  my $u = shift;
+  $u > 0xFFFF ? _derivCE($u) : [$u,0x20,0x02,$u];
 }
 
 ##
@@ -373,7 +367,6 @@ Sort::UCA - use UCA (Unicode Collation Algorithm)
 
   #construct
   $UCA = Sort::UCA->new(%tailoring);
-     # if %tailoring is false (empty), $UCA should do the default collation.
 
   #sort
   @sorted = $UCA->sort(@not_sorted);
@@ -403,6 +396,8 @@ Sort::UCA - use UCA (Unicode Collation Algorithm)
       undefChar => qr/$undefChar/,
       upper_before_lower => $bool,
    );
+   # if %tailoring is false (empty),
+   # $UCA should do the default collation.
 
 =over 4
 
@@ -435,7 +430,9 @@ Overrides a default order or adds a new element
 0043 0068 ; [.0893.0020.0008.0043]      # "Ch" in traditional Spanish
 ENTRIES
 
-=item ignoreName or ignoreChar
+=item ignoreName
+
+=item ignoreChar
 
 -- see Completely Ignorable, 3.2.2 Alternate Weighting, UTR #10.
 
@@ -482,7 +479,9 @@ if any normalization is not desired).
 
 see B<CAVEAT>.
 
-=item overrideCJK or overrideHangul
+=item overrideCJK
+
+=item overrideHangul
 
 -- see 7.1 Derived Collation Elements, UTR #10.
 
@@ -541,7 +540,9 @@ The table file must be in your C<lib/Sort/UCA> directory.
 
 By default, the file C<lib/Sort/UCA/allkeys.txt> is used.
 
-=item undefName or undefChar
+=item undefName
+
+=item undefChar
 
 -- see 6.3.4 Reducing the Repertoire, UTR #10.
 
